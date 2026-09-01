@@ -92,16 +92,14 @@ print("Rating nhiều nhất / User:",
 print("\nThống kê số lượng Rating theo User:")
 print(ratings_per_user.describe())
 
-plt.figure(figsize=(8, 5))
-
-plt.hist(ratings_per_user, bins=30)
-
+plt.figure(1, figsize=(8, 5))
+plt.hist(ratings_per_user, bins=30, color="skyblue", edgecolor="black")
 plt.title("Phân bố số lượng Rating theo User")
 plt.xlabel("Số lượng Rating")
 plt.ylabel("Số lượng User")
-
 plt.tight_layout()
-plt.show()
+plt.show(block=False)
+plt.pause(0.001)
 
 # =========================
 # 6. Số rating trung bình / Movie
@@ -172,13 +170,14 @@ rating_distribution = (
 
 print(rating_distribution)
 
-
-rating_distribution.plot(kind="bar")
-
+plt.figure(2, figsize=(8, 5))
+plt.bar(rating_distribution.index.astype(str), rating_distribution.values, color="salmon", edgecolor="black")
 plt.title("Phân bố Rating")
 plt.xlabel("Rating")
 plt.ylabel("Số lượng Rating")
 plt.xticks(rotation=0)
-
 plt.tight_layout()
-plt.show()
+plt.show(block=False)
+plt.pause(0.001)
+
+input("Nhấn Enter để đóng 2 cửa sổ biểu đồ...")
