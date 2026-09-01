@@ -118,6 +118,14 @@ print("Rating ít nhất / Movie:",
 print("Rating nhiều nhất / Movie:",
       ratings_per_movie.max())
 
+plt.figure(3, figsize=(8, 5))
+plt.hist(ratings_per_movie, bins=30, color="lightgreen", edgecolor="black")
+plt.title("Phân bố số lượng Rating theo Movie")
+plt.xlabel("Số lượng Rating")
+plt.ylabel("Số lượng Movie")
+plt.tight_layout()
+plt.show(block=False)
+plt.pause(0.001)
 
 # =========================
 # 7. Kiểm tra dữ liệu thiếu
@@ -180,4 +188,4 @@ plt.tight_layout()
 plt.show(block=False)
 plt.pause(0.001)
 
-input("Nhấn Enter để đóng 2 cửa sổ biểu đồ...")
+input("Nhấn Enter để đóng 3 cửa sổ biểu đồ...")
