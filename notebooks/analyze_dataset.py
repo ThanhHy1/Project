@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 # 1. Đọc dữ liệu
 # =========================
 
-ratings = pd.read_csv("./ml-latest-small/ratings.csv")
-movies = pd.read_csv("./ml-latest-small/movies.csv")
+ratings = pd.read_csv("./data/ratings.csv")
+movies = pd.read_csv("./data/movies.csv")
 
 # =========================
 # 2. Thông tin tổng quan

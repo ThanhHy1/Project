@@ -2,7 +2,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 # Đọc dữ liệu
-ratings = pd.read_csv("./ml-latest-small/ratings.csv")
+ratings = pd.read_csv("./data/ratings.csv")
 
 # Chia Train 80%, phần còn lại 20%
 train_data, temp_data = train_test_split(
