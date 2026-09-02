@@ -298,20 +298,23 @@ def evaluate_model(
             'train_time_sec' và 'precision@K'/'recall@K' cho mỗi K.
     """
     print(f"\n>>> Đang huấn luyện mô hình: {name} ...")
+    sys.stdout.flush()
     start_time = time.time()
     model.fit(train_data)
     train_time = time.time() - start_time
     print(f"    Huấn luyện xong sau {train_time:.2f} giây.")
 
     print("    Đang tính RMSE trên toàn bộ tập Test ...")
+    sys.stdout.flush()
     rmse_start = time.time()
     rmse = evaluate_rmse(model, test_data)
     print(f"    RMSE = {rmse:.4f} (tính trong {time.time() - rmse_start:.2f}s)")
 
     print(
         f"    Đang tính Precision@K / Recall@K trên mẫu "
-        f"{len(relevant_items_sample)} user ..."
+        f"{len(relevant_items_sample)} user "
     )
+    sys.stdout.flush()
     rank_start = time.time()
     ranking_scores = evaluate_ranking(model, relevant_items_sample, k_list)
     print(f"    Hoàn tất trong {time.time() - rank_start:.2f}s")
@@ -324,6 +327,17 @@ def evaluate_model(
     for k in k_list:
         result[f"precision@{k}"] = ranking_scores[k]["precision"]
         result[f"recall@{k}"] = ranking_scores[k]["recall"]
+
+    # In ngay kết quả của model này (không đợi chạy xong hết cả 4 model
+    # mới thấy số, vì các model CF có thể chạy khá lâu).
+    print(f"\n    ===== Kết quả - {name} =====")
+    print(f"    RMSE            : {rmse:.4f}")
+    for k in k_list:
+        print(
+            f"    Precision@{k:<2} / Recall@{k:<2} : "
+            f"{result[f'precision@{k}']:.4f} / {result[f'recall@{k}']:.4f}"
+        )
+    sys.stdout.flush()
 
     return result
 
@@ -469,4 +483,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main()  
