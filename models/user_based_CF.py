@@ -68,6 +68,24 @@ class UserBasedRecommender(BaseRecommender):
         self.global_mean_rating: float = 0.0
         self.user_seen_items: Dict[int, Set[int]] = {}
 
+        # --- Cache dạng NumPy (hiệu năng) ---
+        # Các cấu trúc dữ liệu bên dưới lưu lại đúng nội dung của
+        # user_item_matrix / user_similarity_matrix / user_means dưới dạng
+        # mảng NumPy thuần (thay vì pandas.DataFrame/Series), giúp predict()
+        # và đặc biệt là recommend() (vốn gọi predict() cho hàng nghìn item
+        # mỗi user) tránh được chi phí overhead rất lớn của việc tra cứu
+        # (indexing) trên pandas trong vòng lặp Python. Kết quả tính toán
+        # là TƯƠNG ĐƯƠNG về mặt toán học với cách làm bằng pandas ở trên,
+        # chỉ khác cách hiện thực để chạy nhanh hơn.
+        self._user_id_to_idx: Dict[int, int] = {}
+        self._item_id_to_idx: Dict[int, int] = {}
+        self._item_ids_arr: np.ndarray = np.array([])
+        self._ratings_filled: np.ndarray = np.array([])  # NaN -> 0.0
+        self._rated_mask: np.ndarray = np.array([])       # True nếu đã rating
+        self._user_means_np: np.ndarray = np.array([])
+        self._sim_np: np.ndarray = np.array([])
+        self._item_avg_np: np.ndarray = np.array([])
+
     def fit(self, train_data: pd.DataFrame) -> None:
         """
         Huấn luyện mô hình từ dữ liệu rating.
@@ -129,6 +147,24 @@ class UserBasedRecommender(BaseRecommender):
             train_data.groupby("userId")["movieId"].apply(set).to_dict()
         )
 
+        # 6. Xây dựng cache NumPy để tăng tốc predict()/recommend() (xem
+        # giải thích ở phần khai báo thuộc tính __init__). Dữ liệu ở đây
+        # được suy ra trực tiếp từ các cấu trúc pandas đã tính ở trên,
+        # không làm thay đổi kết quả, chỉ giúp tính nhanh hơn.
+        self._user_id_to_idx = {
+            uid: idx for idx, uid in enumerate(self.user_item_matrix.index)
+        }
+        self._item_id_to_idx = {
+            iid: idx for idx, iid in enumerate(self.user_item_matrix.columns)
+        }
+        self._item_ids_arr = self.user_item_matrix.columns.to_numpy()
+        raw_values = self.user_item_matrix.to_numpy(dtype=np.float64)
+        self._rated_mask = ~np.isnan(raw_values)
+        self._ratings_filled = np.nan_to_num(raw_values, nan=0.0)
+        self._user_means_np = self.user_means.to_numpy(dtype=np.float64)
+        self._sim_np = self.user_similarity_matrix.to_numpy(dtype=np.float64)
+        self._item_avg_np = self.item_avg_ratings.to_numpy(dtype=np.float64)
+
     def _fallback_rating(self, item_id: int) -> float:
         """
         Trả về giá trị dự đoán fallback khi không đủ dữ liệu để dự đoán
@@ -150,6 +186,50 @@ class UserBasedRecommender(BaseRecommender):
             return float(self.item_avg_ratings.loc[item_id])
         return self.global_mean_rating
 
+    def _predict_by_index(self, user_idx: int, item_idx: int) -> Optional[float]:
+        """
+        Phiên bản NumPy thuần của công thức dự đoán k-NN weighted average,
+        làm việc trực tiếp trên chỉ số (index) nội bộ thay vì userId/movieId
+        gốc. Đây là phần lõi tính toán được cả `predict()` và `recommend()`
+        dùng chung, cài đặt ĐÚNG công thức toán học như mô tả trong
+        `predict()` nhưng tránh chi phí tra cứu (indexing) rất lớn của
+        pandas khi phải gọi lặp lại hàng nghìn lần (trong `recommend()`).
+
+        Args:
+            user_idx (int): Chỉ số nội bộ của user (theo self._user_id_to_idx).
+            item_idx (int): Chỉ số nội bộ của item (theo self._item_id_to_idx).
+
+        Returns:
+            Optional[float]: Rating dự đoán, hoặc None nếu không có láng
+                giềng hợp lệ (cần dùng giá trị fallback).
+        """
+        mask = self._rated_mask[:, item_idx]
+        # Loại bỏ chính user (không tự làm láng giềng của chính mình)
+        if mask[user_idx]:
+            mask = mask.copy()
+            mask[user_idx] = False
+
+        rater_indices = np.flatnonzero(mask)
+        if rater_indices.size == 0:
+            return None
+
+        sims = self._sim_np[user_idx, rater_indices]
+
+        if rater_indices.size > self.k_neighbors:
+            top_pos = np.argpartition(-sims, self.k_neighbors)[: self.k_neighbors]
+            sims = sims[top_pos]
+            rater_indices = rater_indices[top_pos]
+
+        denominator = np.sum(np.abs(sims))
+        if denominator == 0.0:
+            return None
+
+        neighbor_ratings = self._ratings_filled[rater_indices, item_idx]
+        neighbor_means = self._user_means_np[rater_indices]
+        numerator = np.sum(sims * (neighbor_ratings - neighbor_means))
+
+        return float(self._user_means_np[user_idx] + numerator / denominator)
+
     def predict(self, user_id: int, item_id: int) -> float:
         """
         Dự đoán rating của `user_id` cho `item_id` bằng k-NN weighted average.
@@ -159,6 +239,13 @@ class UserBasedRecommender(BaseRecommender):
                                   / [ sum(|sim_i|) ]
             với i chạy trên k user láng giềng gần nhất (theo cosine similarity)
             đã từng đánh giá item_id.
+
+        Ghi chú hiệu năng: phần tính toán thực sự được thực hiện bằng
+        NumPy thuần trong `_predict_by_index()` (xem ở trên) để tránh chi
+        phí lớn của việc tra cứu bằng pandas.loc/sort_values khi hàm này
+        được gọi lặp lại rất nhiều lần (ví dụ trong `recommend()`). Công
+        thức và kết quả trả về hoàn toàn tương đương với cách tính bằng
+        pandas.
 
         Args:
             user_id (int): ID user cần dự đoán.
@@ -176,46 +263,18 @@ class UserBasedRecommender(BaseRecommender):
         if self.user_item_matrix is None or self.user_similarity_matrix is None:
             raise RuntimeError("Mô hình chưa được huấn luyện. Hãy gọi fit() trước.")
 
+        user_idx = self._user_id_to_idx.get(user_id)
+        item_idx = self._item_id_to_idx.get(item_id)
+
         # User hoặc item chưa từng xuất hiện trong tập huấn luyện -> fallback
-        if (
-            user_id not in self.user_item_matrix.index
-            or item_id not in self.user_item_matrix.columns
-        ):
+        if user_idx is None or item_idx is None:
             return self._fallback_rating(item_id)
 
-        # Lấy rating của tất cả user đã từng đánh giá item_id (bỏ NaN)
-        item_ratings = self.user_item_matrix[item_id].dropna()
-        # Loại bỏ chính user_id (không tự làm láng giềng của chính mình)
-        item_ratings = item_ratings.drop(index=user_id, errors="ignore")
-
-        if item_ratings.empty:
+        predicted_rating = self._predict_by_index(user_idx, item_idx)
+        if predicted_rating is None:
             return self._fallback_rating(item_id)
 
-        # Lấy độ tương tự giữa user_id và các user đã đánh giá item_id
-        similarities = self.user_similarity_matrix.loc[user_id, item_ratings.index]
-
-        # Chọn top k_neighbors láng giềng có độ tương tự cao nhất
-        top_neighbors = similarities.sort_values(ascending=False).head(
-            self.k_neighbors
-        )
-
-        weights = top_neighbors.values
-        neighbor_ids = top_neighbors.index
-        neighbor_ratings = item_ratings.loc[neighbor_ids].values
-        neighbor_means = self.user_means.loc[neighbor_ids].values
-
-        denominator = np.sum(np.abs(weights))
-
-        # Xử lý chia cho 0: không có láng giềng nào có độ tương tự khác 0
-        if denominator == 0.0:
-            return self._fallback_rating(item_id)
-
-        numerator = np.sum(weights * (neighbor_ratings - neighbor_means))
-        predicted_rating = float(self.user_means.loc[user_id]) + (
-            numerator / denominator
-        )
-
-        return float(predicted_rating)
+        return predicted_rating
 
     def recommend(self, user_id: int, top_k: int = 10) -> List[int]:
         """
@@ -244,27 +303,49 @@ class UserBasedRecommender(BaseRecommender):
         if top_k <= 0:
             return []
 
-        all_items = self.user_item_matrix.columns.tolist()
         seen_items = self.user_seen_items.get(user_id, set())
-        candidate_items = [item for item in all_items if item not in seen_items]
+        user_idx = self._user_id_to_idx.get(user_id)
 
         # Cold-start: user chưa từng xuất hiện -> fallback theo rating trung bình
-        if user_id not in self.user_item_matrix.index:
+        if user_idx is None:
+            candidate_items = [
+                item for item in self.user_item_matrix.columns if item not in seen_items
+            ]
             fallback_ranking = self.item_avg_ratings.loc[candidate_items].sort_values(
                 ascending=False
             )
             return fallback_ranking.head(top_k).index.tolist()
 
-        # Dự đoán rating cho từng item chưa xem
-        predicted_scores = {
-            item_id: self.predict(user_id, item_id) for item_id in candidate_items
-        }
-
-        ranked_items = sorted(
-            predicted_scores.items(), key=lambda pair: pair[1], reverse=True
+        # Chỉ số các item ứng viên (chưa được user xem) - làm việc trên
+        # index NumPy thay vì list/dict pandas để tránh overhead khi lặp
+        # qua hàng nghìn item (xem _predict_by_index()).
+        candidate_mask = np.array(
+            [item_id not in seen_items for item_id in self._item_ids_arr]
         )
+        candidate_indices = np.flatnonzero(candidate_mask)
 
-        return [item_id for item_id, _ in ranked_items[:top_k]]
+        # Dự đoán rating cho từng item chưa xem (dùng công thức tương
+        # đương predict(), nhưng tính trực tiếp bằng NumPy để nhanh hơn
+        # nhiều lần so với gọi self.predict() theo kiểu pandas).
+        scores = np.empty(candidate_indices.size, dtype=np.float64)
+        for pos, item_idx in enumerate(candidate_indices):
+            predicted = self._predict_by_index(user_idx, int(item_idx))
+            if predicted is None:
+                predicted = self._item_avg_np[item_idx]
+            scores[pos] = predicted
+
+        k = min(top_k, scores.size)
+        if k == 0:
+            return []
+        # Sắp xếp ổn định (stable) giảm dần theo score - tương đương hành vi
+        # sorted() (ổn định) trên predicted_scores.items() của cách làm
+        # gốc: khi có nhiều item cùng điểm dự đoán (ví dụ đều rơi vào
+        # fallback), thứ tự giữa các item bằng điểm được giữ theo đúng thứ
+        # tự candidate_indices ban đầu (tăng dần theo movieId).
+        order = np.argsort(-scores, kind="stable")[:k]
+        top_item_indices = candidate_indices[order]
+
+        return [self._item_ids_arr[idx].item() for idx in top_item_indices]
 
 
 if __name__ == "__main__":
